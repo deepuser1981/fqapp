@@ -1,5 +1,6 @@
 name: Windows build and regression
 
+# fork 构建标记：本分支由 deepuser1981/fqapp 用于出 Windows 绿色包。
 on:
   workflow_dispatch:
     inputs:
