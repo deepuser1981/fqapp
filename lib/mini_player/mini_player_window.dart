@@ -313,7 +313,13 @@ class _MiniPlayerWindowState extends State<MiniPlayerWindow>
       );
       if (!mounted) return;
       if (reply == null || reply['ok'] != true) {
-        _showNotice(delta > 0 ? '已经是最后一集' : '已经是第一集');
+        final hasNext = _payload.hasNext;
+        final hasPrevious = _payload.episodeIndex > 0;
+        _showNotice(
+          delta > 0
+              ? (hasNext ? '下一集加载失败' : '已经是最后一集')
+              : (hasPrevious ? '上一集加载失败' : '已经是第一集'),
+        );
         return;
       }
       final payload = reply['payload'];

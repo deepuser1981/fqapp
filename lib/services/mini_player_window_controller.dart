@@ -143,25 +143,48 @@ class MiniPlayerWindowController {
       await _saveGeometry(event);
     }
     final handler = onState;
-    Map<String, dynamic>? reply;
-    if (handler != null) {
-      try {
-        reply = await handler(event);
-      } catch (error, stack) {
-        AppLog.e(
-          'mini-player',
-          'state handler failed type=${event.type.name}',
-          error: error,
-          stack: stack,
-        );
-      }
-    }
-    if (event.type == MiniPlayerEventType.closed ||
-        event.type == MiniPlayerEventType.returned) {
+    final closing =
+        event.type == MiniPlayerEventType.closed ||
+        event.type == MiniPlayerEventType.returned;
+    if (closing) {
       _closedNotified = true;
       await _resetWindow();
     }
-    return reply;
+    if (handler == null) return null;
+    // 换集请求必须等主窗取流结果；其余消息（尤其 returned/closed）先回执、
+    // 再异步收尾 —— 否则会在平台通道回调里重入 window_manager，主窗线程
+    // 等小窗回执、小窗等主窗处理，表现为切回主窗时假死。
+    if (event.type == MiniPlayerEventType.episode) {
+      try {
+        return await handler(event);
+      } catch (error, stack) {
+        AppLog.e(
+          'mini-player',
+          'episode handler failed',
+          error: error,
+          stack: stack,
+        );
+        return null;
+      }
+    }
+    unawaited(_runHandler(handler, event));
+    return null;
+  }
+
+  Future<void> _runHandler(
+    MiniPlayerStateHandler handler,
+    MiniPlayerEvent event,
+  ) async {
+    try {
+      await handler(event);
+    } catch (error, stack) {
+      AppLog.e(
+        'mini-player',
+        'state handler failed type=${event.type.name}',
+        error: error,
+        stack: stack,
+      );
+    }
   }
 
   Future<void> _checkWindowAlive() async {
