@@ -1315,7 +1315,16 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
       }
       final EpisodeSource source;
       int? renditionHeight;
-      if (warmSource != null) {
+      final forced = _forcedSourceIndex == index ? _forcedSource : null;
+      if (forced != null) {
+        // 小窗换集时已经取到并播过的同一路流：收回主窗直接复用它，
+        // 不再走「离线优先」重新解析（离线缓存里的坏流会 25s 超时）。
+        _forcedSource = null;
+        _forcedSourceIndex = null;
+        trace.source = 'mini';
+        source = forced;
+        renditionHeight = null;
+      } else if (warmSource != null) {
         source = warmSource;
         renditionHeight = warm!.renditionHeight;
       } else {
@@ -1514,6 +1523,10 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
   /// engine for the session only; no cross-launch preference exists there,
   /// so none is stored here either.
   EpisodeSource? _currentSource;
+
+  /// 小窗换集时已取到的流，收回主窗按同一集装载时优先复用。
+  EpisodeSource? _forcedSource;
+  int? _forcedSourceIndex;
 
   /// 按集记住的 `vertical`（官方 `VideoInfo.vertical`）。目录回包若已带该
   /// 字段，[Chapter.vertical] 优先；这里兜住「目录没有、取流响应才有」的
@@ -2116,6 +2129,8 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
     try {
       final source = await _resolveSource(widget.eps[target]);
       if (source == null) return {'ok': false};
+      _forcedSource = source;
+      _forcedSourceIndex = target;
       await _persistMiniProgress(
         MiniPlayerEvent(
           type: MiniPlayerEventType.position,
