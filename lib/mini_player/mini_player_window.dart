@@ -160,6 +160,13 @@ class _MiniPlayerWindowState extends State<MiniPlayerWindow>
         await _closeWindow(send: true);
       case 'focus':
         await windowManager.focus();
+      case 'reopen':
+        final args = call.arguments;
+        if (args is Map) {
+          await _reopen(
+            MiniPlayerPayload.fromJson(Map<String, dynamic>.from(args)),
+          );
+        }
       default:
         return null;
     }
@@ -410,7 +417,8 @@ class _MiniPlayerWindowState extends State<MiniPlayerWindow>
         playingOverride: wasPlaying,
       );
     } finally {
-      await _destroyWindow();
+      await _hideWindow();
+      _closing = false;
     }
   }
 
@@ -423,17 +431,74 @@ class _MiniPlayerWindowState extends State<MiniPlayerWindow>
         await _sendState('closed', withGeometry: true, playingOverride: false);
       }
     } finally {
-      await _destroyWindow();
+      await _hideWindow();
+      _closing = false;
     }
   }
 
-  Future<void> _destroyWindow() async {
+  /// 小窗只隐藏、不销毁。
+  ///
+  /// 2026-11-03 崩溃转储：收回主窗时销毁第二个 Flutter 引擎会让
+  /// `flutter_windows.dll` 在 0x17a58 访问冲突（APPCRASH 0xc0000005）。
+  /// 改成隐藏并保留引擎，下次出窗走 [reopen] 复用；代价是隐藏期间仍占
+  /// 一个解码器，但不会再在收回时把主进程带崩。
+  Future<void> _hideWindow() async {
+    _ticker?.cancel();
     try {
-      await windowManager.setPreventClose(false);
-      await windowManager.close();
+      await windowManager.setAlwaysOnTop(false);
+    } catch (_) {}
+    try {
+      await windowManager.hide();
     } catch (_) {
-      // 窗口已经没了。
+      // 窗口已经不可用：下次 open 会重新建。
     }
+  }
+
+  Future<void> _reopen(MiniPlayerPayload payload) async {
+    _closing = false;
+    _ended = false;
+    _error = null;
+    final sameSource =
+        _player != null &&
+        _payload.url == payload.url &&
+        _payload.keyHex == payload.keyHex;
+    setState(() {
+      _payload = payload;
+      _loading = true;
+    });
+    try {
+      await windowManager.setAlwaysOnTop(true);
+      await windowManager.setSize(Size(payload.width, payload.height));
+      await windowManager.setPosition(Offset(payload.x, payload.y));
+    } catch (_) {
+    } finally {
+      try {
+        await windowManager.show();
+        await windowManager.focus();
+      } catch (_) {}
+    }
+    if (sameSource) {
+      final player = _player!;
+      await player.setVolume((payload.volume.clamp(0, 1) * 100).toDouble());
+      if (payload.rate != 1.0) await player.setRate(payload.rate);
+      await player.seek(Duration(milliseconds: payload.positionMs));
+      if (payload.playing) {
+        await player.play();
+      } else {
+        await player.pause();
+      }
+      _position = Duration(milliseconds: payload.positionMs);
+      _duration = player.state.duration;
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _playing = payload.playing;
+      });
+      _tick();
+      await _sendState('position');
+      return;
+    }
+    await _switchTo(payload);
   }
 
   void _showNotice(String text) {
