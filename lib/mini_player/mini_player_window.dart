@@ -16,7 +16,7 @@ import 'mini_player_view.dart';
 /// 算好放在 payload 里；这里只负责把风格切成无边框、置顶并显示。
 Future<void> runMiniPlayerWindow(MiniPlayerPayload payload) async {
   MediaKit.ensureInitialized();
-  await windowManager.ensureInitialized();
+  await _ensureWindowManager();
   await windowManager.setPreventClose(true);
   unawaited(
     windowManager.waitUntilReadyToShow(
@@ -29,15 +29,31 @@ Future<void> runMiniPlayerWindow(MiniPlayerPayload payload) async {
         title: '什锦铺 · 小窗',
       ),
       () async {
-        await windowManager.setAsFrameless();
-        await windowManager.setPosition(Offset(payload.x, payload.y));
-        await windowManager.setAlwaysOnTop(true);
-        await windowManager.show();
-        await windowManager.focus();
+        try {
+          await windowManager.setAsFrameless();
+          await windowManager.setPosition(Offset(payload.x, payload.y));
+          await windowManager.setAlwaysOnTop(true);
+        } finally {
+          await windowManager.show();
+          await windowManager.focus();
+        }
       },
     ),
   );
   runApp(MiniPlayerApp(payload: payload));
+}
+
+/// desktop_multi_window 建窗时插件注册与 Dart main 可能同时起跑，windowManager 的
+/// 通道偶尔会在第一次调用时还没就绪；重试几次比整窗起不来好。
+Future<void> _ensureWindowManager() async {
+  for (var attempt = 0; attempt < 20; attempt++) {
+    try {
+      await windowManager.ensureInitialized();
+      return;
+    } catch (_) {
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+  }
 }
 
 class MiniPlayerApp extends StatelessWidget {
@@ -96,7 +112,7 @@ class _MiniPlayerWindowState extends State<MiniPlayerWindow>
     _position = Duration(milliseconds: _payload.positionMs);
     _duration = Duration(milliseconds: _payload.durationMs);
     _volume = _payload.volume;
-    unawaited(miniPlayerControlChannel.setMethodCallHandler(_onControl));
+    unawaited(_registerControlChannel());
     windowManager.addListener(this);
     unawaited(_start());
   }
@@ -118,6 +134,17 @@ class _MiniPlayerWindowState extends State<MiniPlayerWindow>
     media?.close();
     unawaited(miniPlayerControlChannel.setMethodCallHandler(null));
     super.dispose();
+  }
+
+  Future<void> _registerControlChannel() async {
+    for (var attempt = 0; attempt < 20; attempt++) {
+      try {
+        await miniPlayerControlChannel.setMethodCallHandler(_onControl);
+        return;
+      } catch (_) {
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      }
+    }
   }
 
   @override
@@ -245,6 +272,7 @@ class _MiniPlayerWindowState extends State<MiniPlayerWindow>
     Map<String, dynamic>? extra,
     bool withGeometry = false,
     bool? playingOverride,
+    Duration timeout = const Duration(seconds: 2),
   }) async {
     try {
       final args = <String, dynamic>{
@@ -263,10 +291,9 @@ class _MiniPlayerWindowState extends State<MiniPlayerWindow>
           'y': bounds.top,
         });
       }
-      final reply = await miniPlayerStateChannel.invokeMethod<dynamic>(
-        method,
-        args,
-      );
+      final reply = await miniPlayerStateChannel
+          .invokeMethod<dynamic>(method, args)
+          .timeout(timeout);
       if (reply is Map) return Map<String, dynamic>.from(reply);
       return null;
     } catch (_) {
@@ -279,7 +306,11 @@ class _MiniPlayerWindowState extends State<MiniPlayerWindow>
     if (_switching) return;
     _switching = true;
     try {
-      final reply = await _sendState('episode', extra: {'delta': delta});
+      final reply = await _sendState(
+        'episode',
+        extra: {'delta': delta},
+        timeout: const Duration(seconds: 20),
+      );
       if (!mounted) return;
       if (reply == null || reply['ok'] != true) {
         _showNotice(delta > 0 ? '已经是最后一集' : '已经是第一集');
