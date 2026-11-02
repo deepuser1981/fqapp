@@ -37,20 +37,17 @@ class MiniPlayerWindowController {
   String? _windowId;
   StreamSubscription<void>? _windowsSub;
   bool _closedNotified = false;
+  bool _visible = false;
   int _lastPositionMs = 0;
   int _lastDurationMs = 0;
   int _lastEpisodeIndex = 0;
 
-  bool get isOpen => _window != null;
+  bool get isOpen => _window != null && _visible;
   String? get windowId => _windowId;
 
   Future<void> open(MiniPlayerPayload data) async {
     if (!isWindowsDesktop) {
       throw StateError('小窗播放只在 Windows 桌面可用');
-    }
-    if (_window != null) {
-      await focus();
-      return;
     }
     final mainBounds = await windowManager.getBounds();
     final display = await _displayFor(mainBounds);
@@ -63,6 +60,29 @@ class MiniPlayerWindowController {
       y: geometry.y,
     );
     await miniPlayerStateChannel.setMethodCallHandler(_handleState);
+    if (_window != null) {
+      // 隐藏复用的窗口：第二个 Flutter 引擎不销毁（销毁会在
+      // flutter_windows.dll 触发 APPCRASH），只重新定位、换源并显示。
+      try {
+        await miniPlayerControlChannel
+            .invokeMethod<void>('reopen', payload.toJson())
+            .timeout(const Duration(seconds: 8));
+        _visible = true;
+        _closedNotified = false;
+        _lastPositionMs = payload.positionMs;
+        _lastDurationMs = payload.durationMs;
+        _lastEpisodeIndex = payload.episodeIndex;
+        AppLog.d(
+          'mini-player',
+          'window reopened id=$_windowId episode=${payload.episodeIndex} '
+              'position=${payload.positionMs}',
+        );
+        return;
+      } catch (error) {
+        AppLog.d('mini-player', 'reopen failed: $error');
+        await _resetWindow();
+      }
+    }
     final controller = await WindowController.create(
       WindowConfiguration(
         hiddenAtLaunch: true,
@@ -71,6 +91,7 @@ class MiniPlayerWindowController {
     );
     _window = controller;
     _windowId = controller.windowId;
+    _visible = true;
     _closedNotified = false;
     _lastPositionMs = payload.positionMs;
     _lastDurationMs = payload.durationMs;
@@ -121,11 +142,9 @@ class MiniPlayerWindowController {
     }
   }
 
-  /// 页面销毁时彻底清掉 handler，避免下个页面收到旧消息。
+  /// 页面销毁时把小窗藏起来，但保留窗口/引擎给下一次播放页复用。
   Future<void> dispose() async {
     await close();
-    await _resetWindow();
-    await miniPlayerStateChannel.setMethodCallHandler(null);
     onState = null;
   }
 
@@ -147,8 +166,8 @@ class MiniPlayerWindowController {
         event.type == MiniPlayerEventType.closed ||
         event.type == MiniPlayerEventType.returned;
     if (closing) {
-      _closedNotified = true;
-      await _resetWindow();
+      _visible = false;
+      _closedNotified = false;
     }
     if (handler == null) return null;
     // 换集请求必须等主窗取流结果；其余消息（尤其 returned/closed）先回执、
@@ -214,6 +233,7 @@ class MiniPlayerWindowController {
     _windowsSub = null;
     _window = null;
     _windowId = null;
+    _visible = false;
   }
 
   Future<void> _saveGeometry(MiniPlayerEvent event) async {
