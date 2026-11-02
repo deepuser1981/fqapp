@@ -207,6 +207,10 @@ class VideoPlayerChrome extends StatefulWidget {
   /// 离线缓存行退化为「暂未支持」占位。
   final VoidCallback? onOpenOfflineCache;
 
+  /// 桌面播放页的「小窗播放」入口：把当前集 + 进度交给独立置顶窗口。
+  /// 仅 Windows 桌面提供；null 时运输条不出现这枚按钮。
+  final VoidCallback? onFloatOut;
+
   /// 可选播放档位（高→低）与当前档 URL。空列表 = 上游单流，
   /// 「清晰度」行不显示（官方 `oi3/k.P()` 门）。
   final List<EpisodeVariant> qualityVariants;
@@ -294,6 +298,7 @@ class VideoPlayerChrome extends StatefulWidget {
     this.onDanmakuSettingsChanged,
     this.onOpenListenMode,
     this.onOpenOfflineCache,
+    this.onFloatOut,
     this.qualityVariants = const [],
     this.currentQualityUrl,
     this.onQualitySelected,

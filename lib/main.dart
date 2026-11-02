@@ -7,6 +7,7 @@ import 'services/platform_channel.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter/services.dart';
+import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -16,6 +17,8 @@ import 'package:hive_ce_flutter/hive_flutter.dart';
 import 'dart:async';
 
 import 'pages/home_page.dart';
+import 'mini_player/mini_player_window.dart';
+import 'services/mini_player_contract.dart';
 import 'pages/audio_page.dart';
 import 'pages/cached_books_page.dart';
 import 'pages/drama_page.dart';
@@ -51,7 +54,7 @@ import 'widgets/shell_dock.dart';
 import 'widgets/unsupported_feature_page.dart';
 import 'widgets/home/home_design.dart';
 
-Future<void> main() async {
+Future<void> main([List<String> args = const []]) async {
   // 绑定初始化与 runApp 必须处在同一个 Zone：此前 `ensureInitialized` 在
   // Zone 外、`runApp` 在 `runZonedGuarded` 里，Flutter 每次冷启动都会断言
   // 「Zone mismatch」并把它当成框架异常抛出来（真机 app.log 每次启动一条
@@ -59,6 +62,17 @@ Future<void> main() async {
   // 噪声里。因此整条启动流程收进同一个受保护的 Zone。
   await runZonedGuarded(() async {
     WidgetsFlutterBinding.ensureInitialized();
+    // 小窗是同一个二进制起的第二个 Flutter 引擎：先看窗口参数，命中就直接
+    // 跑小窗应用，不能继续走 _prepareRuntime（那会把主窗的装配、Hive、
+    // 系统媒体控制全部在小窗里再跑一遍）。
+    if (isWindowsDesktop) {
+      final miniPayload =
+          _miniPlayerPayloadFromArgs(args) ?? await _currentMiniPlayerPayload();
+      if (miniPayload != null) {
+        await runMiniPlayerWindow(miniPayload);
+        return;
+      }
+    }
     // 装配失败不许挡住界面：记一条错误后照常 runApp，各页面自行退化。
     try {
       await _prepareRuntime();
@@ -67,6 +81,28 @@ Future<void> main() async {
     }
     runApp(const ProviderScope(child: FqApp()));
   }, (error, stack) => AppLog.e('zone', '未捕获异步异常', error: error, stack: stack));
+}
+
+/// desktop_multi_window 创建小窗时把 `{"multi_window", windowId, argument}`
+/// 作为 Dart 入口参数传进来；这是比平台通道更早、更稳的判据（插件通道还
+/// 没注册时 main 就已经开始跑了）。
+MiniPlayerPayload? _miniPlayerPayloadFromArgs(List<String> args) {
+  if (args.length >= 3 && args.first == 'multi_window') {
+    return MiniPlayerPayload.tryParse(args[2]);
+  }
+  return null;
+}
+
+/// 当前引擎如果是 desktop_multi_window 建的小窗，返回它的启动参数；
+/// 主窗的窗口参数为空，返回 null 继续走正常启动。
+Future<MiniPlayerPayload?> _currentMiniPlayerPayload() async {
+  try {
+    final controller = await WindowController.fromCurrentEngine();
+    return MiniPlayerPayload.tryParse(controller.arguments);
+  } catch (_) {
+    // 插件未注册/非桌面环境：按主窗处理。
+    return null;
+  }
 }
 
 /// `runApp` 之前的运行时装配：桌面窗口回调、应用内日志、分享与 Rust 日志的桥。
