@@ -344,6 +344,7 @@ class NativePlayer {
   bool _completed = false;
   bool _buffering = false;
   bool _firstFrameRendered = false;
+  double _volume = 1;
   int _videoWidth = 0;
   int _videoHeight = 0;
   int _videoRotationCorrection = 0;
@@ -352,6 +353,7 @@ class NativePlayer {
   Duration get position => _position;
   Duration get duration => _duration;
   bool get playing => _playing;
+  double get volume => _volume;
 
   /// Playback intent stays true while ExoPlayer is buffering or suppressed.
   bool get playWhenReady => _playWhenReady;
@@ -516,8 +518,10 @@ class NativePlayer {
     _positionCtrl.add(position);
   }
 
-  Future<void> setVolume(double volume) =>
-      _invoke('setVolume', {'volume': volume});
+  Future<void> setVolume(double volume) {
+    _volume = volume.clamp(0.0, 1.0).toDouble();
+    return _invoke('setVolume', {'volume': _volume});
+  }
 
   Future<void> setRate(double rate) => _invoke('setRate', {'rate': rate});
 
