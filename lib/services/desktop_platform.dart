@@ -81,18 +81,35 @@ class DesktopPlatform with WindowListener {
     windowManager.addListener(this);
     await windowManager.setPreventClose(true);
     final display = await screenRetriever.getPrimaryDisplay();
-    final available = display.visibleSize ?? display.size;
+    final displays = await screenRetriever.getAllDisplays();
+    final current = await windowManager.getPosition();
+    final target = displays.firstWhere((candidate) {
+      final position = candidate.visiblePosition ?? Offset.zero;
+      final size = candidate.visibleSize ?? candidate.size;
+      return (position & size).contains(current);
+    }, orElse: () => display);
+    final workPosition = target.visiblePosition ?? Offset.zero;
+    final workSize = target.visibleSize ?? target.size;
+    // 不要用 center:true：它按整块虚拟桌面居中，会把窗口跨到另一台显示器，
+    // Flutter 3.44 在跨显示器 DPI 切换时会出现整页白屏/控件偏移。固定在
+    // 窗口当前所在显示器的可用区内居中，启动阶段不做跨屏移动。
+    final windowSize = Size(
+      min(1280, workSize.width),
+      min(800, workSize.height),
+    );
+    final targetPosition = Offset(
+      workPosition.dx + (workSize.width - windowSize.width) / 2,
+      workPosition.dy + (workSize.height - windowSize.height) / 2,
+    );
     await windowManager.waitUntilReadyToShow(
       WindowOptions(
-        size: Size(min(1280, available.width), min(800, available.height)),
-        minimumSize: Size(
-          min(800, available.width),
-          min(440, available.height),
-        ),
-        center: true,
+        size: windowSize,
+        minimumSize: Size(min(800, workSize.width), min(440, workSize.height)),
+        center: false,
         title: '什锦铺',
       ),
       () async {
+        await windowManager.setPosition(targetPosition);
         await windowManager.show();
         await windowManager.focus();
       },
