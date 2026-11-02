@@ -88,7 +88,9 @@ class MiniPlayerWindowController {
 
   Future<void> focus() async {
     try {
-      await miniPlayerControlChannel.invokeMethod<void>('focus');
+      await miniPlayerControlChannel
+          .invokeMethod<void>('focus')
+          .timeout(const Duration(seconds: 1));
     } catch (_) {
       // 窗口刚建还没注册 handler 时忽略：它自己会 focus。
     }
@@ -98,7 +100,9 @@ class MiniPlayerWindowController {
   Future<void> requestReturn() async {
     if (_window == null) return;
     try {
-      await miniPlayerControlChannel.invokeMethod<void>('return');
+      await miniPlayerControlChannel
+          .invokeMethod<void>('return')
+          .timeout(const Duration(seconds: 2));
     } catch (error) {
       AppLog.d('mini-player', 'requestReturn failed: $error');
       await _closeFallback();
@@ -109,7 +113,9 @@ class MiniPlayerWindowController {
   Future<void> close() async {
     if (_window == null) return;
     try {
-      await miniPlayerControlChannel.invokeMethod<void>('close');
+      await miniPlayerControlChannel
+          .invokeMethod<void>('close')
+          .timeout(const Duration(seconds: 2));
     } catch (_) {
       await _closeFallback();
     }

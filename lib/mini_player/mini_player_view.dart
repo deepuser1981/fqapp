@@ -74,6 +74,8 @@ class _MiniPlayerViewState extends State<MiniPlayerView> {
   Duration? _scrub;
   double? _volumeChip;
   double _volume = 1;
+  Duration _latestPosition = Duration.zero;
+  StreamSubscription<Duration>? _positionSub;
 
   bool get _chromeVisible =>
       _visible || !widget.playing || widget.error != null || widget.loading;
@@ -82,6 +84,10 @@ class _MiniPlayerViewState extends State<MiniPlayerView> {
   void initState() {
     super.initState();
     _volume = widget.volume;
+    _latestPosition = widget.position;
+    _positionSub = widget.positionStream.listen((value) {
+      _latestPosition = value;
+    });
     _show();
   }
 
@@ -90,6 +96,13 @@ class _MiniPlayerViewState extends State<MiniPlayerView> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.playing != widget.playing) _show();
     if (oldWidget.volume != widget.volume) _volume = widget.volume;
+    if (oldWidget.positionStream != widget.positionStream) {
+      _positionSub?.cancel();
+      _latestPosition = widget.position;
+      _positionSub = widget.positionStream.listen((value) {
+        _latestPosition = value;
+      });
+    }
   }
 
   @override
@@ -97,6 +110,7 @@ class _MiniPlayerViewState extends State<MiniPlayerView> {
     _hideTimer?.cancel();
     _tapTimer?.cancel();
     _volumeTimer?.cancel();
+    _positionSub?.cancel();
     super.dispose();
   }
 
@@ -139,13 +153,13 @@ class _MiniPlayerViewState extends State<MiniPlayerView> {
       return KeyEventResult.handled;
     }
     if (event.logicalKey == LogicalKeyboardKey.arrowLeft) {
-      final target = widget.position - const Duration(seconds: 10);
+      final target = _latestPosition - const Duration(seconds: 10);
       unawaited(widget.onSeek(target < Duration.zero ? Duration.zero : target));
       _show();
       return KeyEventResult.handled;
     }
     if (event.logicalKey == LogicalKeyboardKey.arrowRight) {
-      final target = widget.position + const Duration(seconds: 10);
+      final target = _latestPosition + const Duration(seconds: 10);
       final end = widget.duration;
       unawaited(
         widget.onSeek(end > Duration.zero && target > end ? end : target),
