@@ -2010,9 +2010,7 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
     final payload = MiniPlayerPayload(
       bookId: widget.bookId,
       title: _seriesTitle.isNotEmpty ? _seriesTitle : widget.title,
-      episodeLabel: _episodeLabel.isNotEmpty
-          ? _episodeLabel
-          : '第 ${_index + 1} 集',
+      episodeLabel: '第 ${_index + 1} 集',
       episodeIndex: _index,
       episodeCount: widget.eps.length,
       coverUrl: ApiClient.instance.absoluteUrl(
@@ -2105,6 +2103,10 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
       }
     }
     if (resume) {
+      // 小窗要等这条 returned 回执才能销毁；推迟 200ms 再把主窗拉到前台，
+      // 避免两个引擎在同一个平台线程上互相等。
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      if (!mounted) return;
       await windowManager.show();
       await windowManager.focus();
     }
