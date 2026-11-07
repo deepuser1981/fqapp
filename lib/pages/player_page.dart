@@ -2058,6 +2058,11 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
   }
 
   Future<Map<String, dynamic>?> _onMiniState(MiniPlayerEvent event) async {
+    AppLog.d(
+      'mini-player',
+      'state ${event.type.name} ep=${event.episodeIndex} '
+          'pos=${event.positionMs} playing=${event.playing}',
+    );
     switch (event.type) {
       case MiniPlayerEventType.position:
         _miniEpisodeIndex = event.episodeIndex;
@@ -2096,7 +2101,12 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
     final target = widget.eps.isEmpty
         ? 0
         : event.episodeIndex.clamp(0, widget.eps.length - 1);
+    AppLog.d(
+      'mini-player',
+      'takeback start resume=$resume target=$target pos=${event.position}',
+    );
     setState(() => _miniOpen = false);
+    AppLog.d('mini-player', 'takeback overlay cleared');
     final player = _player;
     if (player != null && widget.eps.isNotEmpty) {
       if (target != _index) {
@@ -2121,6 +2131,7 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
         }
       }
     }
+    AppLog.d('mini-player', 'takeback player restored');
     // 回主窗与 resume 无关：小窗里暂停着点「回主窗」以前不会走到这里，
     // 主窗被置顶小窗压住，表现为「点了没反应」。
     // 但 show 必须排在播放器恢复与小窗隐藏**之后**：两个引擎在同一个平台
@@ -2128,6 +2139,7 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
     // 与小窗 hide 撞车，CPU 单核跑满、画面冻结在遮罩上）。
     await Future<void>.delayed(const Duration(milliseconds: 400));
     if (!mounted) return;
+    AppLog.d('mini-player', 'takeback bringing window back');
     try {
       await windowManager.show().timeout(const Duration(seconds: 2));
       await windowManager.focus().timeout(const Duration(seconds: 1));

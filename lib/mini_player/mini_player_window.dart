@@ -412,15 +412,17 @@ class _MiniPlayerWindowState extends State<MiniPlayerWindow>
     try {
       await _player?.pause();
     } catch (_) {}
-    // 先把自己藏起来，再把 returned 交给主窗：主窗收到后要 show()，两个
-    // 引擎在同一平台线程上同时做窗口操作会互相等死。先 hide 能让主窗的
-    // show 面对的是一个已经收尾的小窗。
-    try {
-      await _hideWindow();
-    } catch (_) {}
+    // 先把 returned 发出去，再隐藏自己。11:47 实测：先 hide 再发的那一刻，
+    // 主窗的「正在小窗播放」遮罩一直不消失 —— 窗口 hide 之后这条平台通道
+    // 消息排不上队，主窗根本没收到 returned。这里先发（不等回执）、延迟
+    // 150ms 再 hide，给消息留出跨引擎投递的时间。
     unawaited(
       _sendState('returned', withGeometry: true, playingOverride: wasPlaying),
     );
+    await Future<void>.delayed(const Duration(milliseconds: 150));
+    try {
+      await _hideWindow();
+    } catch (_) {}
     _closing = false;
   }
 
