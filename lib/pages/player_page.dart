@@ -2095,39 +2095,37 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
         ? 0
         : event.episodeIndex.clamp(0, widget.eps.length - 1);
     setState(() => _miniOpen = false);
-    // 先把主窗拉回前台，再恢复播放器：seek/play 可能被播放器内部锁拖住，
-    // 若把它们放在 show 之前，用户点「回主窗」会先看到窗口不动（假死）。
-    // 另外 resume=false（小窗里暂停着点回主窗）以前不会 show，主窗被小窗
-    // 压在后面时同样表现为"没反应"，所以这里与播放状态无关。
-    unawaited(_bringMainWindowBack());
     final player = _player;
-    if (player == null || widget.eps.isEmpty) return;
-    if (target != _index) {
-      // 小窗换过集：主窗播放器还停在旧集，按「听书模式回传」同一条路
-      // 重新装载目标集，起播位置用 _listenResume 在 create 前应用。
-      _listenResume = (target, event.position);
-      await _selectEpisode(target);
-      if (!mounted) return;
-      if (!resume) await _player?.pause();
-    } else {
-      await player.seek(event.position);
-      if (resume) {
-        await player.play();
+    if (player != null && widget.eps.isNotEmpty) {
+      if (target != _index) {
+        // 小窗换过集：主窗播放器还停在旧集，按「听书模式回传」同一条路
+        // 重新装载目标集，起播位置用 _listenResume 在 create 前应用。
+        _listenResume = (target, event.position);
+        await _selectEpisode(target);
+        if (!mounted) return;
+        if (!resume) await _player?.pause();
       } else {
-        await player.pause();
+        await player.seek(event.position);
+        if (resume) {
+          await player.play();
+        } else {
+          await player.pause();
+        }
       }
     }
-  }
-
-  /// 小窗收回后把主窗带回前台。
-  ///
-  /// 推迟 200ms 是给 returned 回执留出平台通道的往返时间：小窗要等这条回执
-  /// 才隐藏，两个引擎在同一个平台线程上同时做窗口操作会互相等。
-  Future<void> _bringMainWindowBack() async {
-    await Future<void>.delayed(const Duration(milliseconds: 200));
+    // 回主窗与 resume 无关：小窗里暂停着点「回主窗」以前不会走到这里，
+    // 主窗被置顶小窗压住，表现为「点了没反应」。
+    // 但 show 必须排在播放器恢复与小窗隐藏**之后**：两个引擎在同一个平台
+    // 线程上同时做窗口操作会互相等死（11:28 实测把 show 提前到 seek 前面，
+    // 与小窗 hide 撞车，CPU 单核跑满、画面冻结在遮罩上）。
+    await Future<void>.delayed(const Duration(milliseconds: 400));
     if (!mounted) return;
-    await windowManager.show();
-    await windowManager.focus();
+    try {
+      await windowManager.show().timeout(const Duration(seconds: 2));
+      await windowManager.focus().timeout(const Duration(seconds: 1));
+    } catch (error) {
+      AppLog.w('mini-player', '回主窗失败', error: error);
+    }
   }
 
   Future<Map<String, dynamic>?> _resolveMiniEpisode(int delta) async {

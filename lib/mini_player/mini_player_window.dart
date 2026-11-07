@@ -408,18 +408,20 @@ class _MiniPlayerWindowState extends State<MiniPlayerWindow>
   Future<void> _returnToMain() async {
     if (_closing) return;
     _closing = true;
+    final wasPlaying = _playing;
     try {
-      final wasPlaying = _playing;
       await _player?.pause();
-      await _sendState(
-        'returned',
-        withGeometry: true,
-        playingOverride: wasPlaying,
-      );
-    } finally {
+    } catch (_) {}
+    // 先把自己藏起来，再把 returned 交给主窗：主窗收到后要 show()，两个
+    // 引擎在同一平台线程上同时做窗口操作会互相等死。先 hide 能让主窗的
+    // show 面对的是一个已经收尾的小窗。
+    try {
       await _hideWindow();
-      _closing = false;
-    }
+    } catch (_) {}
+    unawaited(
+      _sendState('returned', withGeometry: true, playingOverride: wasPlaying),
+    );
+    _closing = false;
   }
 
   Future<void> _closeWindow({required bool send}) async {
