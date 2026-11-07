@@ -2071,10 +2071,12 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
           unawaited(_persistMiniProgress(event));
         }
       case MiniPlayerEventType.returned:
-        await _persistMiniProgress(event);
+        // 进度落盘不能挡在回窗前面：Hive/串行写队列一旦卡住，遮罩会一直
+        // 停在「正在小窗播放」（实测 11:31 就是这个形态）。
+        unawaited(_persistMiniProgress(event));
         await _takeBackMini(event, resume: event.playing);
       case MiniPlayerEventType.closed:
-        await _persistMiniProgress(event);
+        unawaited(_persistMiniProgress(event));
         await _takeBackMini(event, resume: false);
       case MiniPlayerEventType.episode:
         return _resolveMiniEpisode(event.delta);
@@ -2101,15 +2103,21 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
         // 小窗换过集：主窗播放器还停在旧集，按「听书模式回传」同一条路
         // 重新装载目标集，起播位置用 _listenResume 在 create 前应用。
         _listenResume = (target, event.position);
-        await _selectEpisode(target);
+        try {
+          await _selectEpisode(target).timeout(const Duration(seconds: 8));
+        } catch (error) {
+          AppLog.w('mini-player', '收回时切换剧集失败/超时', error: error);
+        }
         if (!mounted) return;
-        if (!resume) await _player?.pause();
+        if (!resume && _player != null) {
+          await _playerCommand(() => _player!.pause());
+        }
       } else {
-        await player.seek(event.position);
+        await _playerCommand(() => player.seek(event.position));
         if (resume) {
-          await player.play();
+          await _playerCommand(() => player.play());
         } else {
-          await player.pause();
+          await _playerCommand(() => player.pause());
         }
       }
     }
@@ -2125,6 +2133,16 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
       await windowManager.focus().timeout(const Duration(seconds: 1));
     } catch (error) {
       AppLog.w('mini-player', '回主窗失败', error: error);
+    }
+  }
+
+  /// 播放器命令加超时：native 侧不回调时（暂停状态 seek 实测会卡住），
+  /// 收回主窗不能被它拖住。
+  Future<void> _playerCommand(Future<void> Function() action) async {
+    try {
+      await action().timeout(const Duration(seconds: 3));
+    } catch (error) {
+      AppLog.w('mini-player', '主窗播放器命令失败/超时', error: error);
     }
   }
 
@@ -2196,7 +2214,7 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
       event.durationMs > 0 ? event.durationMs : _miniDurationMs,
     );
     try {
-      await _history.save(entry);
+      await _history.save(entry).timeout(const Duration(seconds: 3));
     } catch (error) {
       AppLog.d('mini-player', '小窗进度落盘失败: $error');
     }
