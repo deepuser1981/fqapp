@@ -291,9 +291,14 @@ class LibraryStore implements ReaderStore {
 
   List<Map<String, dynamic>> historySnapshot() {
     historySnapshotBuilds++;
+    final box = _histBox;
+    // 关窗时 beforeClose 会 Hive.close()，而窗口销毁前 Flutter 还可能再渲染
+    // 一帧；此时读箱会抛 HiveError: Box has already been closed，把一次正常
+    // 退出变成整页渲染异常（表现为假死/红屏）。箱已关就当作没有历史。
+    if (!box.isOpen) return const [];
     final byIdentity = <(String, String), Map<String, dynamic>>{};
-    for (final key in _histBox.keys) {
-      final record = _historyRecord(_histBox.get(key), id: key.toString());
+    for (final key in box.keys) {
+      final record = _historyRecord(box.get(key), id: key.toString());
       if (record == null) continue;
       final identity = _historyIdentity(record);
       final previous = byIdentity[identity];
