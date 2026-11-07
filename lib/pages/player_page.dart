@@ -2108,6 +2108,14 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
       await player.seek(event.position);
       if (resume) {
         await player.play();
+        // media_kit 在窗口重新激活后的第一次 play 有时不生效（用户实测
+        // 「收回主窗后画面暂停、要手点一下播放」）。500ms 后复核一次，
+        // 还没播就再发一次 play —— 只动播放器，不碰窗口操作。
+        await Future<void>.delayed(const Duration(milliseconds: 500));
+        if (mounted && !player.playing) {
+          AppLog.d('mini-player', 'takeback play retry');
+          await player.play();
+        }
       } else {
         await player.pause();
       }
