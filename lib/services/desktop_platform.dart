@@ -55,6 +55,10 @@ class DesktopPlatform with WindowListener {
   static final navigatorKey = GlobalKey<NavigatorState>();
   static final readerBrightness = ValueNotifier<double>(1);
   static final fullscreen = ValueNotifier<bool>(false);
+
+  /// 主窗进入「小窗形态」时隐藏桌面外壳（导航栏/顶栏）；与 fullscreen 并列，
+  /// 由播放页切换，窗口本身仍是同一个 Flutter 引擎。
+  static final miniMode = ValueNotifier<bool>(false);
   final _events = <String, StreamController<dynamic>>{};
   final _players = <int, _DesktopPlayer>{};
   final _tts = FlutterTts();
@@ -82,17 +86,27 @@ class DesktopPlatform with WindowListener {
     await windowManager.setPreventClose(true);
     final display = await screenRetriever.getPrimaryDisplay();
     final available = display.visibleSize ?? display.size;
+    // 不要用 center:true：这台机器是一块跨两屏的 3840×1080 桌面，按整块
+    // 桌面居中会把窗口放到两屏接缝上，Flutter 3.44 的 Windows 合成器会在
+    // 跨输出表面上出白屏/卡帧。固定在左上角（初始窗口所在输出内），启动
+    // 阶段不做跨输出移动。
+    final windowSize = Size(
+      min(1280, available.width),
+      min(800, available.height),
+    );
+    const targetPosition = Offset(40, 40);
     await windowManager.waitUntilReadyToShow(
       WindowOptions(
-        size: Size(min(1280, available.width), min(800, available.height)),
+        size: windowSize,
         minimumSize: Size(
           min(800, available.width),
           min(440, available.height),
         ),
-        center: true,
+        center: false,
         title: '什锦铺',
       ),
       () async {
+        await windowManager.setPosition(targetPosition);
         await windowManager.show();
         await windowManager.focus();
       },

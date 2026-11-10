@@ -267,6 +267,7 @@ class FakeNativePlayer extends NativePlayer {
   bool isBuffering = false;
   bool disposed = false;
   double rate = 1;
+  @override
   double volume = 1;
   final positions = StreamController<Duration>.broadcast(sync: true);
   final durations = StreamController<Duration>.broadcast(sync: true);

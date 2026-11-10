@@ -5,6 +5,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:window_manager/window_manager.dart';
 
 import '../models/audio_extra.dart' show RelatedWork;
 import '../models/media_item.dart';
@@ -34,6 +35,9 @@ import '../services/video_catalogue.dart';
 import '../services/player_layout_preferences.dart';
 import '../services/player_load_diagnostics.dart';
 import '../services/player_preferences.dart';
+import '../services/mini_player_contract.dart';
+import '../services/mini_player_window_controller.dart';
+import '../mini_player/mini_player_view.dart';
 import '../services/player_style_config.dart';
 import '../services/quality_memory.dart';
 import '../services/swipe_guide_store.dart';
@@ -236,6 +240,23 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
       PlayerHistory(widget.historyStore ?? LibraryStore.instance);
   Duration _duration = Duration.zero;
   bool _playing = false;
+
+  /// 独立小窗播放中（Windows）：主窗播放器暂停但保留解码器，进度由小窗
+  /// 每秒回传，主窗统一落盘；收回时 seek 回小窗位置。
+  bool _miniOpen = false;
+  int _miniEpisodeIndex = 0;
+  int _miniPositionMs = 0;
+  int _miniDurationMs = 0;
+  bool _miniPlaying = false;
+  int _miniLastPersistMs = 0;
+
+  /// 同窗口小窗形态：把主窗本身缩成小窗，视频/播放器/进度都留在同一个
+  /// Flutter 引擎里，避开第二个引擎收回时在 flutter_windows.dll 的崩溃。
+  bool _miniMode = false;
+  bool _miniAlwaysOnTop = true;
+  Rect? _savedBounds;
+  bool _savedMaximized = false;
+  String _savedTitle = '什锦铺';
 
   bool _current(int generation, [NativePlayer? player]) =>
       mounted &&
@@ -817,6 +838,10 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
     _unregisterFairMemoryFlush = null;
     unawaited(NativePlayer.setKeepScreenOn(false).catchError((Object _) {}));
     unawaited(_stopFloating());
+    if (_miniOpen) {
+      _miniOpen = false;
+      unawaited(MiniPlayerWindowController.instance.dispose());
+    }
     _progressTimer?.cancel();
     _prefetchTimer?.cancel();
     _autoCacheTimer?.cancel();
@@ -1302,7 +1327,16 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
       }
       final EpisodeSource source;
       int? renditionHeight;
-      if (warmSource != null) {
+      final forced = _forcedSourceIndex == index ? _forcedSource : null;
+      if (forced != null) {
+        // 小窗换集时已经取到并播过的同一路流：收回主窗直接复用它，
+        // 不再走「离线优先」重新解析（离线缓存里的坏流会 25s 超时）。
+        _forcedSource = null;
+        _forcedSourceIndex = null;
+        trace.source = 'mini';
+        source = forced;
+        renditionHeight = null;
+      } else if (warmSource != null) {
         source = warmSource;
         renditionHeight = warm!.renditionHeight;
       } else {
@@ -1501,6 +1535,10 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
   /// engine for the session only; no cross-launch preference exists there,
   /// so none is stored here either.
   EpisodeSource? _currentSource;
+
+  /// 小窗换集时已取到的流，收回主窗按同一集装载时优先复用。
+  EpisodeSource? _forcedSource;
+  int? _forcedSourceIndex;
 
   /// 按集记住的 `vertical`（官方 `VideoInfo.vertical`）。目录回包若已带该
   /// 字段，[Chapter.vertical] 优先；这里兜住「目录没有、取流响应才有」的
@@ -1733,10 +1771,11 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
   }
 
   Widget _chrome(PlayerLayoutMode layoutMode) {
+    if (_miniMode) return _miniPlayerLayout();
     // 官方播放页开关来自 config.json（`PlayerBottomStyleConfig` 等），
     // 每次 build 重读，配置变化无需重启页面。
     final style = PlayerStyleConfig.instance;
-    return VideoPlayerChrome(
+    final chrome = VideoPlayerChrome(
       layoutMode: layoutMode,
       splitPanel: _buildSplitPanel(),
       player: _player,
@@ -1826,7 +1865,13 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
       padNewBottomStyle: style.padNewBottomStyle,
       reverseClearScreen: style.reverseClearScreen,
       landscapeLockEnabled: style.landscapeLockEnabled,
+      onFloatOut: isWindowsDesktop ? () => unawaited(_enterMiniMode()) : null,
       child: _videoArea(),
+    );
+    if (!_miniOpen) return chrome;
+    return Stack(
+      fit: StackFit.expand,
+      children: [chrome, _miniHandoverLayer()],
     );
   }
 
@@ -1949,6 +1994,466 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
       await player.seek(position);
     }
     if (wasPlaying) await player.play();
+  }
+
+  /// 把当前集 + 当前进度交给独立置顶小窗。
+  ///
+  bool _episodeVertical() {
+    if (widget.eps.isEmpty) return false;
+    return widget.eps[_index].vertical ??
+        _episodeVerticals[widget.eps[_index].itemId] ??
+        false;
+  }
+
+  Future<void> _enterMiniMode() async {
+    if (!isWindowsDesktop || _miniMode || _initVideo || _error != null) return;
+    final player = _player;
+    if (player == null || !player.isCreated) return;
+    final wasMaximized = await windowManager.isMaximized();
+    final bounds = await windowManager.getBounds();
+    final title = await windowManager.getTitle();
+    final vertical = _episodeVertical();
+    final aspect = player.videoWidth > 0 && player.videoHeight > 0
+        ? player.videoWidth / player.videoHeight
+        : vertical
+        ? 9 / 16
+        : 16 / 9;
+    final size = aspect < 1 ? const Size(270, 480) : const Size(420, 236);
+    final left = (bounds.right - size.width - 24)
+        .clamp(0.0, bounds.right - size.width)
+        .toDouble();
+    final top = (bounds.bottom - size.height - 24)
+        .clamp(0.0, bounds.bottom - size.height)
+        .toDouble();
+    _savedBounds = bounds;
+    _savedMaximized = wasMaximized;
+    _savedTitle = title;
+    if (wasMaximized) await windowManager.unmaximize();
+    await windowManager.setTitle('什锦铺 · 小窗');
+    // 主窗最小尺寸是 800×440，小窗 420×236 必须先放宽下限，否则
+    // window_manager 会把 setSize 夹回原尺寸。
+    await windowManager.setMinimumSize(const Size(240, 135));
+    await windowManager.setAsFrameless();
+    await Future<void>.delayed(const Duration(milliseconds: 60));
+    await windowManager.setAlwaysOnTop(true);
+    await windowManager.setSize(size);
+    await windowManager.setPosition(Offset(left, top));
+    if (!mounted) return;
+    setState(() {
+      _miniMode = true;
+      _miniAlwaysOnTop = true;
+    });
+    DesktopPlatform.miniMode.value = true;
+    await windowManager.show();
+    await windowManager.focus();
+    await Future<void>.delayed(const Duration(milliseconds: 60));
+    await windowManager.setSize(size);
+    await windowManager.setPosition(Offset(left, top));
+    AppLog.d(
+      'mini-player',
+      'same-window mini entered ${size.width}x${size.height}',
+    );
+  }
+
+  Future<void> _exitMiniMode({required bool pause}) async {
+    if (!_miniMode) return;
+    if (pause) await _player?.pause();
+    DesktopPlatform.miniMode.value = false;
+    try {
+      await windowManager.setAlwaysOnTop(false);
+      await windowManager.setTitleBarStyle(TitleBarStyle.normal);
+      if (_savedBounds != null) await windowManager.setBounds(_savedBounds!);
+      await windowManager.setTitle(_savedTitle);
+      if (_savedMaximized) await windowManager.maximize();
+      // 先恢复大窗再抬回最小尺寸；反过来会在 420×236 的窗口上抛异常，
+      // 整段收回中断，小窗卡死。
+      await windowManager.setMinimumSize(const Size(800, 440));
+    } catch (error, stack) {
+      AppLog.e(
+        'mini-player',
+        'same-window mini restore failed',
+        error: error,
+        stack: stack,
+      );
+    }
+    if (!mounted) return;
+    setState(() => _miniMode = false);
+    try {
+      await windowManager.show();
+      await windowManager.focus();
+    } catch (_) {}
+    AppLog.d('mini-player', 'same-window mini exited pause=$pause');
+  }
+
+  Future<void> _toggleMiniPlay() async {
+    final player = _player;
+    if (player == null) return;
+    if (_playing) {
+      await player.pause();
+    } else {
+      await player.play();
+    }
+  }
+
+  Future<void> _toggleMiniPin() async {
+    final next = !_miniAlwaysOnTop;
+    await windowManager.setAlwaysOnTop(next);
+    if (!mounted) return;
+    setState(() => _miniAlwaysOnTop = next);
+  }
+
+  Widget _miniPlayerLayout() {
+    final player = _player;
+    final vertical = _episodeVertical();
+    final aspect =
+        player != null && player.videoWidth > 0 && player.videoHeight > 0
+        ? player.videoWidth / player.videoHeight
+        : vertical
+        ? 9 / 16
+        : 16 / 9;
+    final title = _seriesTitle.isNotEmpty ? _seriesTitle : widget.title;
+    final cover = ApiClient.instance.absoluteUrl(
+      _seriesCover.isNotEmpty ? _seriesCover : widget.cover,
+    );
+    return Material(
+      color: Colors.black,
+      child: MiniPlayerView(
+        aspect: aspect,
+        coverUrl: cover,
+        title: title,
+        episodeLabel: '第 ${_index + 1} 集',
+        playing: _playing,
+        position: player?.position ?? Duration.zero,
+        duration: _duration,
+        positionStream:
+            player?.positionStream ?? const Stream<Duration>.empty(),
+        volume: player?.volume ?? 1,
+        alwaysOnTop: _miniAlwaysOnTop,
+        loading: _initVideo || (player?.buffering ?? false),
+        error: _error?.message,
+        video: _videoArea(),
+        onToggle: () async {
+          await _toggleMiniPlay();
+        },
+        onSeek: (duration) async {
+          final p = player;
+          if (p != null) await p.seek(duration);
+        },
+        onPrevious: _index > 0
+            ? () => unawaited(_selectEpisode(_index - 1))
+            : () {},
+        onNext: _index + 1 < widget.eps.length
+            ? () => unawaited(_selectEpisode(_index + 1))
+            : () {},
+        onVolume: (value) async {
+          final p = player;
+          if (p != null) await p.setVolume(value);
+        },
+        onReturn: () => unawaited(_exitMiniMode(pause: false)),
+        onClose: () => unawaited(_exitMiniMode(pause: true)),
+        onTogglePin: () => unawaited(_toggleMiniPin()),
+      ),
+    );
+  }
+
+  /// 主窗播放器只暂停不销毁：小窗用独立解码器播同一集，收回时主窗直接
+  /// seek 回小窗位置，不用重新取流；这也保证任一时刻只有一路音频。
+  // ignore: unused_element
+  Future<void> _enterMini() async {
+    if (!isWindowsDesktop || _miniOpen) return;
+    final player = _player;
+    final source = _currentSource;
+    if (player == null ||
+        source == null ||
+        source.url.isEmpty ||
+        !player.isCreated ||
+        _initVideo ||
+        _error != null) {
+      return;
+    }
+    final wasPlaying = _playing;
+    final vertical =
+        widget.eps.isNotEmpty &&
+        (widget.eps[_index].vertical ??
+            _episodeVerticals[widget.eps[_index].itemId] ??
+            false);
+    final aspect = player.videoWidth > 0 && player.videoHeight > 0
+        ? player.videoWidth / player.videoHeight
+        : vertical
+        ? 9 / 16
+        : 16 / 9;
+    var rate = 1.0;
+    try {
+      rate = await PlayerPreferences.loadPlaybackRate();
+    } catch (_) {}
+    await player.pause();
+    if (!mounted) return;
+    final controller = MiniPlayerWindowController.instance;
+    final payload = MiniPlayerPayload(
+      bookId: widget.bookId,
+      title: _seriesTitle.isNotEmpty ? _seriesTitle : widget.title,
+      episodeLabel: '第 ${_index + 1} 集',
+      episodeIndex: _index,
+      episodeCount: widget.eps.length,
+      coverUrl: ApiClient.instance.absoluteUrl(
+        _seriesCover.isNotEmpty ? _seriesCover : widget.cover,
+      ),
+      url: source.url,
+      keyHex: source.keyHex,
+      positionMs: player.position.inMilliseconds,
+      durationMs: _duration.inMilliseconds,
+      playing: wasPlaying,
+      volume: player.volume,
+      rate: rate,
+      vertical: vertical,
+      aspect: aspect,
+    );
+    controller.onState = _onMiniState;
+    setState(() {
+      _miniOpen = true;
+      _miniEpisodeIndex = _index;
+      _miniPositionMs = payload.positionMs;
+      _miniDurationMs = payload.durationMs;
+      _miniPlaying = wasPlaying;
+      _miniLastPersistMs = payload.positionMs;
+    });
+    try {
+      await controller.open(payload);
+    } catch (error, stack) {
+      AppLog.e('mini-player', '小窗启动失败', error: error, stack: stack);
+      if (!mounted) return;
+      controller.onState = null;
+      setState(() => _miniOpen = false);
+      if (wasPlaying) unawaited(player.play());
+      PlayerToast.show(context, '小窗启动失败，已回主窗');
+    }
+  }
+
+  Future<Map<String, dynamic>?> _onMiniState(MiniPlayerEvent event) async {
+    switch (event.type) {
+      case MiniPlayerEventType.position:
+        _miniEpisodeIndex = event.episodeIndex;
+        _miniPositionMs = event.positionMs;
+        _miniDurationMs = event.durationMs;
+        _miniPlaying = event.playing;
+        if (mounted) setState(() {});
+        if (event.positionMs - _miniLastPersistMs >= 5000 ||
+            event.positionMs < _miniLastPersistMs) {
+          _miniLastPersistMs = event.positionMs;
+          unawaited(_persistMiniProgress(event));
+        }
+      case MiniPlayerEventType.returned:
+        await _persistMiniProgress(event);
+        await _takeBackMini(event, resume: event.playing);
+      case MiniPlayerEventType.closed:
+        await _persistMiniProgress(event);
+        await _takeBackMini(event, resume: false);
+      case MiniPlayerEventType.episode:
+        return _resolveMiniEpisode(event.delta);
+      case MiniPlayerEventType.error:
+        if (mounted && event.message != null) {
+          PlayerToast.show(context, event.message!);
+        }
+    }
+    return null;
+  }
+
+  Future<void> _takeBackMini(
+    MiniPlayerEvent event, {
+    required bool resume,
+  }) async {
+    if (!mounted) return;
+    final target = widget.eps.isEmpty
+        ? 0
+        : event.episodeIndex.clamp(0, widget.eps.length - 1);
+    setState(() => _miniOpen = false);
+    final player = _player;
+    if (player == null || widget.eps.isEmpty) return;
+    if (target != _index) {
+      // 小窗换过集：主窗播放器还停在旧集，按「听书模式回传」同一条路
+      // 重新装载目标集，起播位置用 _listenResume 在 create 前应用。
+      _listenResume = (target, event.position);
+      await _selectEpisode(target);
+      if (!mounted) return;
+      if (!resume) await _player?.pause();
+    } else {
+      await player.seek(event.position);
+      if (resume) {
+        await player.play();
+      } else {
+        await player.pause();
+      }
+    }
+    if (resume) {
+      // 小窗要等这条 returned 回执才能销毁；推迟 200ms 再把主窗拉到前台，
+      // 避免两个引擎在同一个平台线程上互相等。
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      if (!mounted) return;
+      await windowManager.show();
+      await windowManager.focus();
+    }
+  }
+
+  Future<Map<String, dynamic>?> _resolveMiniEpisode(int delta) async {
+    if (widget.eps.isEmpty) return {'ok': false};
+    final target = (_miniEpisodeIndex + delta).clamp(0, widget.eps.length - 1);
+    if (target == _miniEpisodeIndex) return {'ok': false};
+    try {
+      final source = await _resolveSource(widget.eps[target]);
+      if (source == null) return {'ok': false};
+      _forcedSource = source;
+      _forcedSourceIndex = target;
+      await _persistMiniProgress(
+        MiniPlayerEvent(
+          type: MiniPlayerEventType.position,
+          episodeIndex: _miniEpisodeIndex,
+          positionMs: _miniPositionMs,
+          durationMs: _miniDurationMs,
+          playing: _miniPlaying,
+        ),
+      );
+      final vertical =
+          widget.eps[target].vertical ??
+          _episodeVerticals[widget.eps[target].itemId] ??
+          source.vertical ??
+          false;
+      var rate = 1.0;
+      try {
+        rate = await PlayerPreferences.loadPlaybackRate();
+      } catch (_) {}
+      _miniEpisodeIndex = target;
+      _miniPositionMs = 0;
+      _miniDurationMs = 0;
+      return {
+        'ok': true,
+        'payload': MiniPlayerPayload(
+          bookId: widget.bookId,
+          title: _seriesTitle.isNotEmpty ? _seriesTitle : widget.title,
+          episodeLabel: '第 ${target + 1} 集',
+          episodeIndex: target,
+          episodeCount: widget.eps.length,
+          coverUrl: ApiClient.instance.absoluteUrl(
+            _seriesCover.isNotEmpty ? _seriesCover : widget.cover,
+          ),
+          url: source.url,
+          keyHex: source.keyHex,
+          positionMs: 0,
+          durationMs: 0,
+          playing: true,
+          volume: _player?.volume ?? 1,
+          rate: rate,
+          vertical: vertical,
+          aspect: vertical ? 9 / 16 : 16 / 9,
+        ).toJson(),
+      };
+    } catch (error) {
+      AppLog.d('mini-player', '小窗换集取流失败: $error');
+      return {'ok': false};
+    }
+  }
+
+  Future<void> _persistMiniProgress(MiniPlayerEvent event) async {
+    final index = event.episodeIndex;
+    if (index < 0 || index >= widget.eps.length) return;
+    unawaited(_markWatched(index));
+    final entry = _miniHistoryEntry(
+      index,
+      event.positionMs,
+      event.durationMs > 0 ? event.durationMs : _miniDurationMs,
+    );
+    try {
+      await _history.save(entry);
+    } catch (error) {
+      AppLog.d('mini-player', '小窗进度落盘失败: $error');
+    }
+  }
+
+  Widget _miniHandoverLayer() {
+    final index = widget.eps.isEmpty
+        ? 0
+        : _miniEpisodeIndex.clamp(0, widget.eps.length - 1);
+    final label = widget.eps.isEmpty ? '' : '第 ${index + 1} 集';
+    final time = _miniClock(Duration(milliseconds: _miniPositionMs));
+    return ColoredBox(
+      color: const Color(0xB3000000),
+      child: Center(
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(24, 22, 24, 20),
+          decoration: BoxDecoration(
+            color: const Color(0xE61C1C1F),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: const Color(0x1FFFFFFF)),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 7,
+                    height: 7,
+                    decoration: const BoxDecoration(
+                      color: Color(0xFFEF5038),
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  const SizedBox(width: 9),
+                  const Text(
+                    '正在小窗播放',
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.white,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Text(
+                '$label · $time',
+                style: const TextStyle(
+                  fontSize: 12,
+                  color: Color(0xB3FFFFFF),
+                  fontFeatures: [FontFeature.tabularFigures()],
+                ),
+              ),
+              const SizedBox(height: 16),
+              OutlinedButton(
+                onPressed: () => unawaited(
+                  MiniPlayerWindowController.instance.requestReturn(),
+                ),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: Colors.white,
+                  side: const BorderSide(color: Color(0x33FFFFFF)),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 18,
+                    vertical: 10,
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+                child: const Text('收回主窗'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  String _miniClock(Duration value) {
+    final seconds = value.inSeconds < 0 ? 0 : value.inSeconds;
+    final hours = seconds ~/ 3600;
+    final minutes = (seconds % 3600) ~/ 60;
+    final secs = seconds % 60;
+    if (hours > 0) {
+      return '$hours:${minutes.toString().padLeft(2, '0')}:'
+          '${secs.toString().padLeft(2, '0')}';
+    }
+    return '${minutes.toString().padLeft(2, '0')}:'
+        '${secs.toString().padLeft(2, '0')}';
   }
 
   Widget _videoArea() {

@@ -4,6 +4,7 @@
 
 list(APPEND FLUTTER_PLUGIN_LIST
   connectivity_plus
+  desktop_multi_window
   file_selector_windows
   flutter_secure_storage_windows
   flutter_tts
