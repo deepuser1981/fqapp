@@ -1280,6 +1280,16 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
     String? avoidVariant,
   }) async {
     if (!mounted || _switchingSeries || widget.eps.isEmpty) return;
+    // `_index` 可能被外部（导航传参、历史恢复、目录刷新）改到范围外。越界在
+    // 这里抛 RangeError 的话，`_loadTrace` 已经 begin、API 请求还没发出，
+    // 屏幕上就只剩一个「3ms 失败」——换成哪一集都复现同一条路径。
+    if (_index < 0 || _index >= widget.eps.length) {
+      AppLog.w(
+        'player',
+        '集序号越界，忽略这次装载 index=$_index eps=${widget.eps.length}',
+      );
+      return;
+    }
     _loadTrace?.finish('superseded');
     final generation = ++_loadGeneration;
     final index = _index;
@@ -1521,6 +1531,16 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
       ApiException() => error.statusCode,
       _ => null,
     };
+    // 失败原因必须能落到日志里：此前只在 player-load 采样里留下「address
+    // 阶段、3ms」这种线索，看不到到底是取流接口报错、地址拼不出来，还是
+    // 库里根本没这一集。只记类型与关键字段，不记 URL（可能带签名）。
+    AppLog.w(
+      'player-fail',
+      'episode=${_index + 1} type=${error.runtimeType} '
+          'message=${error is ApiException ? error.message : ''} '
+          'upstreamCode=${error is ApiException ? error.upstreamCode : ''} '
+          'status=$httpStatusCode itemId=${widget.eps[_index].itemId}',
+    );
     _loadTrace?.fail(errorCode: errorCode, httpStatusCode: httpStatusCode);
     _sources.invalidate(widget.eps[_index].itemId);
     // 播放失败后要能把整条链路（含下一集预热）重新来过：一次失败曾经会把
