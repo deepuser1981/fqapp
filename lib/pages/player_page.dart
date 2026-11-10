@@ -1251,10 +1251,23 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
     }();
     // Every new session waits for all previously detached players, even if a
     // later request supersedes the request which initiated their teardown.
-    _releases = Future.wait([
+    //
+    // 「排队的顺序」与「失败的结果」必须分开：原生 dispose 有 10s 超时，
+    // 超时会抛出 StateError/TimeoutException。让失败在链上停留，就等于让
+    // 一次偶发的释放超时变成后续每一次装载都要等它、且看它脸色的前置条件。
+    // 这里把每一段 `release` 就地兜住，只把「是否已经排完队」往下传 ——
+    // 释放失败只影响它自己，绝不传染给下一个会话。
+    final settled = release.then<void>(
+      (_) {},
+      onError: (Object error) {
+        AppLog.w('player', '释放播放器失败（不影响下一次装载）'
+            ' (${error.runtimeType})');
+      },
+    );
+    _releases = Future.wait<void>([
       _releases,
-      release,
-    ]).then<void>((_) {}).catchError((Object _) {});
+      settled,
+    ]).then<void>((_) {});
     return _releases;
   }
 
@@ -1510,6 +1523,9 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
     };
     _loadTrace?.fail(errorCode: errorCode, httpStatusCode: httpStatusCode);
     _sources.invalidate(widget.eps[_index].itemId);
+    // 播放失败后要能把整条链路（含下一集预热）重新来过：一次失败曾经会把
+    // 预热播放器留在 `_warm` 里挡着，导致「换哪一集都失败，只能重启」。
+    _dropWarm();
     if (error is! OfflineEpisodeUnavailable && _retrySilently()) return;
     _prefetchTimer?.cancel();
     _prefetchTimer = null;
@@ -2458,8 +2474,18 @@ class _PlayerPageState extends State<PlayerPage> with WidgetsBindingObserver {
 
   Widget _videoArea() {
     final generation = _loadGeneration;
+    // 用户点「重试」时不能只再跑一遍 `_loadVideo`：失败会留下预热播放器、
+    // 过期的取流缓存和已经走完的静默重试预算，三者任一都会让重试继续失败
+    // —— 症状就是「第一次失败之后，换哪一集都不行，只能重启」。
     void retry() {
-      if (_current(generation)) unawaited(_loadVideo(refresh: true));
+      if (!_current(generation)) return;
+      // 清掉可能残留的预热会话与取流缓存，从头取地址。
+      _dropWarm();
+      _sources.invalidate(widget.eps[_index].itemId);
+      // 重新给满静默重试预算：手动重试意味着用户愿意再等一轮。
+      _silentRetriesLeft = 2;
+      _silentRetryUntil = DateTime.now().add(_silentRetryWindow);
+      unawaited(_loadVideo(refresh: true));
     }
 
     final player = _player;

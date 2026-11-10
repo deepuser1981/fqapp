@@ -15,11 +15,13 @@ extension _PlayerPagePreload on _PlayerPageState {
   void _scheduleAutoCache(NativePlayer player) {
     if (!widget.shortSeries || widget.bookId.isEmpty) return;
     if (_autoCacheFor == _index) return;
-    // 同一集的首帧会来好几次（起播、换流、重试），别每次都把 2 秒推后。
+    // 同一集的首帧会来好几次（起播、换流、重试），别每次都把等待推后。
     if (_autoCacheTimer != null && _autoCacheTimerIndex == _index) return;
     _autoCacheTimer?.cancel();
     _autoCacheTimerIndex = _index;
-    _autoCacheTimer = Timer(const Duration(seconds: 2), () {
+    // 起播后很快就排下一集：原来等 2 秒，连播时下一集常常还没排上就切走了，
+    // 「提前备好一集」等于没生效。这里降到 800ms，只够让本集先稳住带宽。
+    _autoCacheTimer = Timer(const Duration(milliseconds: 800), () {
       _autoCacheTimer = null;
       _autoCacheTimerIndex = null;
       // 判活用播放器实例而不是 generation：换流重试会让 generation 递增，
@@ -216,6 +218,10 @@ extension _PlayerPagePreload on _PlayerPageState {
     }
     final second = _silentRetriesLeft == 1;
     _silentRetriesLeft--;
+    // 静默重试也要换掉可能已经坏掉的预热与取流缓存：只 `refresh: true`
+    // 会让 `_episodeSource` 重新取地址，但预热播放器仍留在 `_warm` 里，
+    // 下次切集还会捡起它 —— CDN 偶发拒绝后就成了「换哪一集都失败」。
+    _dropWarm();
     unawaited(
       _loadVideo(
         refresh: true,
