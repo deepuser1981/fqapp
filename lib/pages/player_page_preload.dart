@@ -252,17 +252,27 @@ extension _PlayerPagePreload on _PlayerPageState {
     String? avoidVariant,
     PlayerLoadTrace? trace,
   }) async {
+    // 失败排查：`address` 阶段几毫秒就结束、日志里又看不到 `/api/v1/videos`
+    // 时，唯一能区分的是「哪一步先抛」。这里按步骤打点，最后一次打点之后
+    // 抛出的异常就是原因。
+    AppLog.d('src', 'begin itemId=${episode.itemId} refresh=$refresh');
     final offline = await _offlineSource(episode);
     if (offline != null) {
       trace?.source = 'offline';
+      AppLog.d('src', 'offline hit itemId=${episode.itemId}');
       return (offline, null);
     }
+    AppLog.d('src', 'offline miss，转在线');
     if (widget.contentLoader == null && !(await currentConnectivity()).online) {
+      AppLog.w('src', '判定离线，抛 OfflineEpisodeUnavailable');
       throw const OfflineEpisodeUnavailable();
     }
+    AppLog.d('src', '开始取流');
     final request = _sources.request(episode, refresh: refresh);
     trace?.source = request.origin.name;
+    AppLog.d('src', '取流已排队 origin=${request.origin.name}');
     var online = await request.future;
+    AppLog.d('src', '取流返回 url=${online.url}');
     int? height;
     // 会话内记住的画质选择（官方=引擎当前档）：按画质名在本集自己
     // 的 variants 里找，找到就用，找不到回默认（#60：换下一集不
