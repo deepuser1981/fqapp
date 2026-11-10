@@ -1,7 +1,6 @@
 import '../models/media_item.dart';
 import 'api_client.dart';
 import 'backend_transport.dart';
-import 'connectivity_status.dart';
 import 'drama_download_store.dart';
 
 /// Online directories are authoritative; offline playback keeps their saved
@@ -35,11 +34,9 @@ Future<List<Chapter>> loadVideoCatalogue({
     ];
   }
 
-  if (loader == null && !(await currentConnectivity()).online) {
-    final local = await fallback();
-    if (local.isNotEmpty) return local;
-    throw const ApiException('当前离线，且没有可用的剧集目录');
-  }
+  // 不再用 connectivity_plus 的形态结论决定「要不要联网取目录」：后端就在
+  // 本机，插件报 none 并不代表拿不到目录（Windows 上它长期报 none）。
+  // 先照常请求，失败了再退回本地兜底，文案也才说得准。
   try {
     final volumes =
         await (loader?.call() ??

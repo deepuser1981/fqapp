@@ -259,20 +259,22 @@ extension _PlayerPagePreload on _PlayerPageState {
     final offline = await _offlineSource(episode);
     if (offline != null) {
       trace?.source = 'offline';
-      AppLog.d('src', 'offline hit itemId=${episode.itemId}');
       return (offline, null);
     }
-    AppLog.d('src', 'offline miss，转在线');
-    if (widget.contentLoader == null && !(await currentConnectivity()).online) {
-      AppLog.w('src', '判定离线，抛 OfflineEpisodeUnavailable');
-      throw const OfflineEpisodeUnavailable();
-    }
-    AppLog.d('src', '开始取流');
+    // 不再用 `connectivity_plus` 的结论把播放提前判死。
+    //
+    // 曾经这里在「插件说离线」时直接抛 OfflineEpisodeUnavailable，屏幕上是
+    // 「此集尚未缓存 / 当前离线」。问题在于这个判断经常是假的：
+    //   - 后端就在 127.0.0.1，取流走的是本机 Rust core，跟网卡形态无关；
+    //   - Windows 上 connectivity_plus 会稳定回报 `none`（虚拟网卡、代理、
+    //     插件订阅失效都会），一旦它翻转，之后每一集都在 3ms 内失败；
+    //   - 预热也走这条链路，预热失败是静默的，于是先坏的是「下一集备好」，
+    //     用户看到的是「播到某集之后，换哪一集都不行」。
+    // 正确做法是照常发起请求，让真实的失败原因浮上来（连不上 / 超时 /
+    // 上游报错各有各的文案），而不是替用户猜一个「没缓存」。
     final request = _sources.request(episode, refresh: refresh);
     trace?.source = request.origin.name;
-    AppLog.d('src', '取流已排队 origin=${request.origin.name}');
     var online = await request.future;
-    AppLog.d('src', '取流返回 url=${online.url}');
     int? height;
     // 会话内记住的画质选择（官方=引擎当前档）：按画质名在本集自己
     // 的 variants 里找，找到就用，找不到回默认（#60：换下一集不

@@ -10,7 +10,6 @@ import 'package:flutter/foundation.dart';
 import '../models/media_item.dart';
 import '../widgets/player/player_video_layout.dart';
 import 'api_client.dart';
-import 'connectivity_status.dart';
 import 'drama_download_store.dart';
 import 'drama_mute_preferences.dart';
 import 'episode_source_cache.dart';
@@ -762,9 +761,10 @@ class InlineVideoPlayback {
         // 离线索引读不出来就当没有缓存。
       }
     }
-    if (contentLoader == null && !(await currentConnectivity()).online) {
-      throw const OfflineEpisodeUnavailable();
-    }
+    // 见 player_page_preload.dart `_episodeSource` 的同一条注释：后端就在
+    // 本机，用 connectivity_plus 的形态结论把播放提前判死会误杀 ——
+    // Windows 上它稳定回报 none，之后每次取流都变成「此集尚未缓存」。
+    // 这里照常发起请求，让真实原因（连不上 / 超时 / 上游报错）浮上来。
     return _sources.request(episode).future;
   }
 
