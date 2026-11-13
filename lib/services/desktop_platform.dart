@@ -94,6 +94,10 @@ class DesktopPlatform with WindowListener {
   static final navigatorKey = GlobalKey<NavigatorState>();
   static final readerBrightness = ValueNotifier<double>(1);
   static final fullscreen = ValueNotifier<bool>(false);
+
+  /// 主窗进入「小窗形态」时隐藏桌面外壳（导航栏/顶栏）；与 fullscreen 并列，
+  /// 由播放页切换，窗口本身仍是同一个 Flutter 引擎。
+  static final miniMode = ValueNotifier<bool>(false);
   final _events = <String, StreamController<dynamic>>{};
   final _players = <int, _DesktopPlayer>{};
   final _tts = FlutterTts();
