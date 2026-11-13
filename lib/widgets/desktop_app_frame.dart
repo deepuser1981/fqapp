@@ -157,8 +157,7 @@ class DesktopAppFrame extends StatelessWidget {
                                             textInputAction:
                                                 TextInputAction.search,
                                             decoration: InputDecoration(
-                                              hintText:
-                                                  '搜索小说、短剧、漫画、听书 / 作品 ID',
+                                              hintText: '搜索小说、短剧、漫画、听书 / 作品 ID',
                                               isDense: true,
                                               prefixIcon: const Icon(
                                                 LucideIcons.search,
